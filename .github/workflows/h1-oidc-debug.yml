@@ -9,6 +9,7 @@ jobs:
     timeout-minutes: 5
     steps:
       - name: Probe Sonatype Guide OIDC broker
+        shell: bash {0}
         run: |
           set -uo pipefail
           mint() {
